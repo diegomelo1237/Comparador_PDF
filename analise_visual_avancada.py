@@ -1,94 +1,67 @@
-# VERSAO_CROP_AUTOMATICO_V8
 import cv2
 import numpy as np
 from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 import streamlit as st
 
+
 class AnalisadorVisual:
-    def __init__(self, img_esquerda, img_direita):
-        # 1. Converte e aplica o recorte automático de bordas brancas/vazias em ambas
-        self.img_esquerda = self._recortar_bordas_vazias(img_esquerda.convert('RGB'))
-        self.img_direita = self._recortar_bordas_vazias(img_direita.convert('RGB'))
-        
-        # 2. Equaliza os tamanhos das áreas úteis recortadas
+    def __init__(self, img_esquerda, img_direita, rotacionar_180=False):
+        self.img_esquerda = img_esquerda.convert('RGB').copy()
+        self.img_direita = self._orientar_verticalmente(img_direita.convert('RGB'), rotacionar_180)
         self.normalizar_tamanhos()
 
-    def _recortar_bordas_vazias(self, img):
-        """ Detecta a área útil colorida da embalagem e remove o excesso de fundo branco/claro """
+    def _orientar_verticalmente(self, img, rotacionar_180=False):
         img_array = np.array(img)
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        
-        # Inverte a imagem: o que é branco vira preto e o que é colorido vira branco
-        _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-        
-        # Encontra os contornos da área colorida (a embalagem verde)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if contours:
-            # Pega o maior contorno (que obrigatoriamente é o retângulo da embalagem)
-            maior_contorno = max(contours, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(maior_contorno)
-            
-            # Recorta a imagem exatamente na bordinha da arte verde
-            img_recortada = img_array[y:y+h, x:x+w]
-            return Image.fromarray(img_recortada)
-        
-        return img
+        altura, largura = img_array.shape[:2]
+
+        # 1. Se a imagem estiver deitada (paisagem), rotaciona para ficar em pé (retrato)
+        if largura > altura:
+            img_array = cv2.rotate(img_array, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        # 2. CORREÇÃO OPCIONAL de ponta-cabeça — só aplica se o usuário ativar
+        if rotacionar_180:
+            img_array = cv2.rotate(img_array, cv2.ROTATE_180)
+
+        return Image.fromarray(img_array)
 
     def normalizar_tamanhos(self):
         esq = np.array(self.img_esquerda)
-        dir = np.array(self.img_direita)
-        
-        altura_esq, largura_esq = esq.shape[:2]
-        altura_dir, largura_dir = dir.shape[:2]
-        
-        esq_e_paisagem = largura_esq > altura_esq
-        dir_e_paisagem = largura_dir > altura_dir
-        
-        if esq_e_paisagem != dir_e_paisagem:
-            dir = cv2.rotate(dir, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            
-        # Redimensiona a arte útil para bater pixel com pixel perfeitamente
-        dir = cv2.resize(dir, (largura_esq, altura_esq), interpolation=cv2.INTER_AREA)
-        self.img_direita = Image.fromarray(dir)
+        dir_ = np.array(self.img_direita) # 'dir_' para evitar conflito com função built-in
+        altura, largura = esq.shape[:2]
+        if dir_.shape[:2] != (altura, largura):
+            dir_ = cv2.resize(dir_, (largura, altura), interpolation=cv2.INTER_AREA)
+            self.img_direita = Image.fromarray(dir_)
 
     def detectar_diferencas_visuais(self):
         img1 = cv2.cvtColor(np.array(self.img_esquerda), cv2.COLOR_RGB2GRAY)
         img2 = cv2.cvtColor(np.array(self.img_direita), cv2.COLOR_RGB2GRAY)
-        
-        # Desfoque leve para remover serrilhados e focando nas formas
-        img1_blur = cv2.GaussianBlur(img1, (5, 5), 0)
-        img2_blur = cv2.GaussianBlur(img2, (5, 5), 0)
-        
-        # Diferença absoluta direta na arte limpa e sem bordas
-        diff = cv2.absdiff(img1_blur, img2_blur)
-        
-        # Limiar adaptado para capturar alterações severas (como novas tabelas e textos mudados)
-        thresh = cv2.threshold(diff, 50, 255, cv2.THRESH_BINARY)[1]
-        
-        # Remove poeiras de pixel isoladas
-        kernel_clean = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_clean)
-        
-        # Dilatação para cercar o bloco completo modificado de uma vez só
-        kernel_join = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
-        thresh = cv2.dilate(thresh, kernel_join, iterations=1)
-        
-        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        contornos_filtrados = []
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            # Ignora imperfeições de borda de corte e foca em mudanças de conteúdo
-            if w > 25 and h > 25 and cv2.contourArea(c) > 400:
-                contornos_filtrados.append(c)
-                
-        score = ssim(img1, img2, win_size=3)
-        return score, contornos_filtrados, thresh
 
-    def extrair_elementos_graficos(self):
-        img_array = np.array(self.img_esquerda)
+        # Garante que win_size seja ímpar, >= 3 e menor que as dimensões da imagem
+        min_dim = min(img1.shape[:2])
+        win_size = min(7, min_dim - 1)
+        if win_size % 2 == 0:
+            win_size -= 1
+        win_size = max(win_size, 3)
+
+        score, diff = ssim(img1, img2, full=True, win_size=win_size)
+        diff = (diff * 255).astype("uint8")
+
+        # Inverte o diff: áreas de diferença ficam brancas (255), fundo preto (0)
+        diff_inv = cv2.bitwise_not(diff)
+
+        # Threshold com Otsu para separar diferenças do fundo
+        _, thresh = cv2.threshold(diff_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Dilatação leve para agrupar diferenças próximas
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        thresh = cv2.dilate(thresh, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return score, contours, diff
+
+    def extrair_elementos_graficos(self, img): # Recebe img como parâmetro
+        img_array = np.array(img)
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         edges = cv2.Canny(gray, 100, 200)
         contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -96,62 +69,74 @@ class AnalisadorVisual:
         return len(elementos), elementos
 
     def comparar_elementos_graficos(self):
-        elementos_esq, _ = self.extrair_elementos_graficos()
-        img_array = np.array(self.img_direita)
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        edges = cv2.Canny(gray, 100, 200)
-        contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        elementos_dir = len([c for c in contours if cv2.contourArea(c) > 100])
+        elementos_esq, _ = self.extrair_elementos_graficos(self.img_esquerda)
+        elementos_dir, _ = self.extrair_elementos_graficos(self.img_direita)
         diferenca = elementos_esq - elementos_dir
         return elementos_esq, elementos_dir, diferenca
 
     def gerar_relatorio_visual(self):
         score, contours, diff = self.detectar_diferencas_visuais()
         elem_esq, elem_dir, diferenca_elem = self.comparar_elementos_graficos()
-        
-        relatorio = {
+
+        # Filtra ruídos pequenos da contagem oficial de diferenças
+        contornos_reais = [c for c in contours if cv2.contourArea(c) > 50]
+
+        return {
             'similaridade': score,
-            'contornos_encontrados': len(contours),
+            'contornos_encontrados': len(contornos_reais),
             'elementos_esquerda': elem_esq,
             'elementos_direita': elem_dir,
-            'diferenca_elementos': diferenca_elem
+            'diferenca_elementos': diferenca_elem,
+            'diff_img': diff  # Útil para debug visual
         }
-        return relatorio
 
     def marcar_diferencas(self):
-        img_marcada = np.array(self.img_esquerda).copy()
+        img_marcada = np.array(self.img_direita).copy()
         score, contours, diff = self.detectar_diferencas_visuais()
         for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            cv2.rectangle(img_marcada, (x, y), (x + w, y + h), (0, 0, 255), 4)
-        return Image.fromarray(img_marcada)
+            if cv2.contourArea(contour) > 50:
+                x, y, w, h = cv2.boundingRect(contour)
+                # Desenha o retângulo delimitando o erro em vermelho (RGB: 255, 0, 0)
+                cv2.rectangle(img_marcada, (x, y), (x + w, y + h), (255, 0, 0), 2)
+        return Image.fromarray(img_marcada), diff # Retorna diff também para o heatmap
+
+    def gerar_heatmap_diferencas(self, diff):
+        """Gera um heatmap colorido das diferenças para melhor visualização."""
+        diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
+        heatmap = cv2.applyColorMap(diff_norm, cv2.COLORMAP_JET)
+        heatmap_rgb = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(heatmap_rgb)
 
 
 class IntegracaoStreamlit:
-    def __init__(self, pdf_esquerda, pdf_direita):
+    def __init__(self, pdf_esquerda, pdf_direita, rotacionar_180=False, dpi_opcao=150):
         self.pdf_esquerda = pdf_esquerda
         self.pdf_direita = pdf_direita
+        self.rotacionar_180 = rotacionar_180
+        self.dpi_opcao = dpi_opcao
         self.analisador = None
         self._inicializar_analisador()
 
     def _inicializar_analisador(self):
         from pdf2image import convert_from_path, convert_from_bytes
         try:
+            # --- PROCESSANDO O PDF DA ESQUERDA ---
             if isinstance(self.pdf_esquerda, str):
-                imgs_esq = convert_from_path(self.pdf_esquerda, dpi=150)
+                imgs_esq = convert_from_path(self.pdf_esquerda, dpi=self.dpi_opcao)
             else:
                 self.pdf_esquerda.seek(0)
-                imgs_esq = convert_from_bytes(self.pdf_esquerda.read(), dpi=150)
+                imgs_esq = convert_from_bytes(self.pdf_esquerda.read(), dpi=self.dpi_opcao)
 
+            # --- PROCESSANDO O PDF DA DIREITA ---
             if isinstance(self.pdf_direita, str):
-                imgs_dir = convert_from_path(self.pdf_direita, dpi=150)
+                imgs_dir = convert_from_path(self.pdf_direita, dpi=self.dpi_opcao)
             else:
                 self.pdf_direita.seek(0)
-                imgs_dir = convert_from_bytes(self.pdf_direita.read(), dpi=150)
+                imgs_dir = convert_from_bytes(self.pdf_direita.read(), dpi=self.dpi_opcao)
 
             if imgs_esq and imgs_dir:
-                self.analisador = AnalisadorVisual(imgs_esq[0], imgs_dir[0])
-                
+                self.analisador = AnalisadorVisual(imgs_esq[0], imgs_dir[0], self.rotacionar_180)
+
         except Exception as e:
             st.error(f"Erro ao processar PDFs: {str(e)}")
 
@@ -159,24 +144,55 @@ class IntegracaoStreamlit:
         if not self.analisador:
             st.warning("Analisador não inicializado.")
             return None
-        
-        relatorio = self.analisador.gerar_relatorio_visual()
-        
-        st.subheader("Métricas da Análise")
-        col_metrica1, col_metrica2 = st.columns(2)
-        with col_metrica1:
-            st.metric(label="Índice de Similaridade", value=f"{relatorio['similaridade']:.2%}")
-        with col_metrica2:
-            st.metric(label="Alterações Estruturais Detetadas", value=relatorio['contornos_encontrados'])
 
-        st.subheader("Comparação Visual (Área Útil Recortada)")
+        relatorio = self.analisador.gerar_relatorio_visual()
+
+        # --- MÉTRICAS ---
+        st.subheader("Métricas da Análise")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            similaridade_pct = relatorio['similaridade'] * 100
+            cor_delta = "normal" if similaridade_pct >= 95 else "inverse"
+            st.metric(
+                label="Similaridade (SSIM)",
+                value=f"{similaridade_pct:.2f}%",
+                delta="Alta" if similaridade_pct >= 95 else "Baixa",
+                delta_color=cor_delta
+            )
+        with col2:
+            st.metric(
+                label="Diferenças Visuais Detectadas",
+                value=relatorio['contornos_encontrados']
+            )
+        with col3:
+            st.metric(
+                label="Δ Elementos Gráficos",
+                value=relatorio['diferenca_elementos'],
+                help="Diferença no número de elementos gráficos detectados (Original - Manipulado)"
+            )
+
+        # --- COMPARAÇÃO LADO A LADO ---
+        st.subheader("Comparação Visual")
         col_esq, col_dir = st.columns(2)
-        
+
+        img_marcada, diff = self.analisador.marcar_diferencas()
+
         with col_esq:
-            img_marcada = self.analisador.marcar_diferencas()
-            st.image(img_marcada, caption="PDF 1 - Esquerda (Erros Circulados na Arte)", use_container_width=True)
-            
+            st.image(
+                self.analisador.img_esquerda,
+                caption="PDF Original",
+                use_container_width=True
+            )
         with col_dir:
-            st.image(self.analisador.img_direita, caption="PDF 2 - Direita (Arte Alinhada)", use_container_width=True)
-            
+            st.image(
+                img_marcada,
+                caption="PDF Manipulado (diferenças em vermelho)",
+                use_container_width=True
+            )
+
+        # --- HEATMAP DE DIFERENÇAS ---
+        with st.expander("Ver Heatmap de Diferenças (Debug Visual)"):
+            heatmap = self.analisador.gerar_heatmap_diferencas(diff)
+            st.image(heatmap, caption="Heatmap — Azul = similar | Vermelho = diferente", use_container_width=True)
+
         return relatorio
