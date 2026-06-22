@@ -1,6 +1,9 @@
-streamlit
-opencv-python-headless
-numpy
-pillow
-scikit-image
-pdf2image
+streamlit>=1.32.0
+pytesseract>=0.3.10
+pdf2image>=1.17.0
+Pillow>=10.0.0
+numpy==1.26.4 # Fixa a versão do numpy
+opencv-python==4.5.5.64 # Fixa a versão do opencv-python
+scikit-image>=0.21.0
+torch>=2.0.0
+torchvision>=0.15.0
